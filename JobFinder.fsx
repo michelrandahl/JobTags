@@ -192,7 +192,7 @@ let parseBriefDescriptionFromDiv (div : HtmlNode)
 /// collect all brief job descriptions from a job listing page
 /// example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/2/
 let getBriefJobDescriptions (html : JobFinderListing)
-                       : Either<string,JobPostingDescription> seq =
+                            : Either<string,JobPostingDescription> seq =
     html.Lists.Html.CssSelect "[itemtype='https://schema.org/JobPosting']"
     |> Seq.map parseBriefDescriptionFromDiv
 
@@ -255,7 +255,6 @@ let getDescriptionWords (description : string) : string list =
                        else None)
         |> Seq.map (fun x -> x.TrimEnd '.')
         |> Seq.map (fun x -> x.TrimEnd '-')
-        |> Seq.map (fun x -> x.TrimEnd '+')
         |> Seq.filter ((<>)"")
         |> Seq.filter (fun x -> // remove numbers
             match Int32.TryParse x with
