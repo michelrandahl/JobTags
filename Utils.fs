@@ -26,16 +26,14 @@ let either = new EitherBuilder()
 /// unfortunatly it can only be used inside recursive functions
 let rec getFunctionName =
     function
-    | Patterns.Call(None, methodInfo, _) -> Right methodInfo.Name
+    | Patterns.Call(None, methodInfo, _) -> methodInfo.Name
     | Patterns.Lambda(_, expr) -> getFunctionName expr
-    | _ -> Left "error in Utils.getFunctionName"
+    | _ -> failwith "error in Utils.getFunctionName"
 
 let functionFailWith (expr : Expr) (msg : string) =
-    match getFunctionName expr with
-    | Right name ->
-        sprintf "ERROR IN FUNCTION %s\n%s" name msg
-        |> Left
-    | Left err -> Left err
+    let name = getFunctionName expr
+    sprintf "ERROR IN FUNCTION %s\n%s" name msg
+    |> Left
 
 
 let isRunningMono = Type.GetType("Mono.Runtime") <> null
