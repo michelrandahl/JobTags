@@ -43,7 +43,7 @@ printfn "you are running mono: %b!" isRunningMono
 
 // ssl in mono is weird, so curl to the rescue!
 /// web reader function for unix
-let webReaderUnix (url: string) : Either<string, string> =
+let rec webReaderUnix (url: string) : Either<string, string> =
     try
         let proc = new System.Diagnostics.Process()
         proc.EnableRaisingEvents <- false
@@ -54,10 +54,12 @@ let webReaderUnix (url: string) : Either<string, string> =
         proc.Start() |> ignore
         proc.StandardOutput.ReadToEnd()
         |> Right
-    with exp -> Left (sprintf "ERROR IN 'webReaderUnix' FOR URL %s\n\n%A" url exp)
+    with exp ->
+        sprintf "failed for url %s\n%A" url exp
+        |> functionFailWith <@ webReaderUnix @>
 
 /// web reader function for .net
-let webReaderNet (url: string) : Either<string,string> =
+let rec webReaderNet (url: string) : Either<string,string> =
     try
         // what security!?
         ServicePointManager.ServerCertificateValidationCallback <- (fun _ _ _ _ -> true)
@@ -67,7 +69,9 @@ let webReaderNet (url: string) : Either<string,string> =
         wr.UserAgent <- "test.bot" //"safari"
         let stream = wr.GetResponse().GetResponseStream()
         Right( (new StreamReader(stream)).ReadToEnd() )
-    with exp -> Left (sprintf "ERROR IN 'web_reader' FOR URL %s\n\n%A" url exp)
+    with exp ->
+        sprintf "failed for url %s\n%A" url exp
+        |> functionFailWith <@ webReaderNet @>
 
 let webReader (url: string) : Either<string,string> =
     if isRunningMono
