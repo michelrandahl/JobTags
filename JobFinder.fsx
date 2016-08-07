@@ -1,113 +1,14 @@
 #r "../../packages/FSharp.Data/lib/net40/FSharp.Data.dll"
 #r "System.Xml.Linq.dll"
+#load "Utils.fs"
+#load "JobInformationDefinitions.fs"
+#load "JobInformationExtraction.fs"
 
 open FSharp.Data
 open System
-open System.IO
-open System.Net
-open System.Net.Security
-open System.Threading
-open System.Security.Cryptography.X509Certificates
-open System.Text.RegularExpressions
-
-
-type Either<'a,'b> = Left of 'a
-                   | Right of 'b
-type EitherBuilder() =
-    member this.Bind (x,f) =
-        match x with
-        | Left msg -> Left msg
-        | Right result -> f result
-    member this.Return x =
-        Right x
-let either = new EitherBuilder()
-
-let isRunningMono = Type.GetType("Mono.Runtime") <> null
-printfn "running mono: %b" isRunningMono
-
-// ssl in mono is weird, so curl to the rescue!
-/// web reader function for unix
-let webReaderUnix (url: string) : Either<string, string> =
-    try
-        let proc = new System.Diagnostics.Process()
-        proc.EnableRaisingEvents <- false
-        proc.StartInfo.RedirectStandardOutput <- true
-        proc.StartInfo.UseShellExecute <- false
-        proc.StartInfo.FileName <- "curl"
-        proc.StartInfo.Arguments <- (sprintf "-s %s" url)
-        proc.Start() |> ignore
-        proc.StandardOutput.ReadToEnd()
-        |> Right
-    with exp -> Left (sprintf "ERROR IN 'webReaderUnix' FOR URL %s\n\n%A" url exp)
-
-/// web reader function for windows
-let webReaderNet (url: string) : Either<string,string> =
-    try
-        // what security!?
-        ServicePointManager.ServerCertificateValidationCallback <- (fun _ _ _ _ -> true)
-        ServicePointManager.Expect100Continue <- true
-        ServicePointManager.SecurityProtocol <- SecurityProtocolType.Tls12
-        let wr = WebRequest.CreateHttp url
-        wr.UserAgent <- "test.bot" //"safari"
-        let stream = wr.GetResponse().GetResponseStream()
-        Right( (new StreamReader(stream)).ReadToEnd() )
-    with exp -> Left (sprintf "ERROR IN 'web_reader' FOR URL %s\n\n%A" url exp)
-
-let webReader (url: string) : Either<string,string> =
-    if isRunningMono
-    then webReaderUnix url
-    else webReaderNet url
-
-type KeyWord = Single of string
-             | Composite of string * string
-
-// make it possible to let the user specify keywords
-let language_keywords = [
-    Single "matlab"
-    Single "c#"
-    Single "f#"
-    Single "csharp"
-    Single "fsharp"
-    Single "c++"
-    Single "java"
-    Single "java"
-    Single "python"
-    Single ".net"
-    Single "visual-basic"
-    Single "vb.net"
-    Single "lua"
-    Single "haskell"
-    Single "idris"
-    Single "erlang"
-    Single "vhdl"
-    Single "elixir"
-    Single "javascript"
-    Single "nodejs"
-    Single "node"
-    Single "html5"
-    Single "jvm"
-    Single "scala"
-    Single "clojure"
-    Single "apl"
-    Single "cuda"
-    Single "r"
-    Single "c"
-    Single "vb"
-    Single "ruby"
-    Single "sql"
-    ]
-
-// make it possible to let the user specify keywords
-let other_keywords = [
-    Single "firmware"
-    Single "programmering"
-    Single "rtos"
-    Single "crm"
-    Single "linux"
-    Single "windows"
-    Composite ("machine","learning")
-    Composite ("design","patterns")
-    ]
+open Utils
+open JobInformationDefinitions
+open JobInformationExtraction
 
 let base_url = "https://www.jobfinder.dk"
 let url = "https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/"
@@ -117,26 +18,6 @@ type JobFinderListing = HtmlProvider<"jobfinder_listing_sample.html">
 
 // example page: https://www.jobfinder.dk/en-gb/job/329519738/it-chef/
 type JobFinderPost = HtmlProvider<"jobfinder_post_sample.html">
-
-type JobPostingDescription = {
-    title : string
-    description : string
-    url : string
-    }
-
-type MetaInfo = {
-    recruiter : string
-    location : string
-    posted : DateTime
-    closes : DateTime
-    }
-
-type JobPosting = {
-    description : JobPostingDescription
-    long_description : string
-    language_tags : string list
-    meta_info : MetaInfo
-    }
 
 /// fetch link for next job listing url from next button in the bottom of the page
 /// example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/
@@ -169,62 +50,76 @@ let collectJobListingUrls (url : string) : Either<string,string list> =
                  return url :: xs })
                 (Right [])
 
-/// parse brief job description from a div
+/// parse base job information from a div
 /// example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/2/
-let parseBriefDescriptionFromDiv (div : HtmlNode)
-                                 : Either<string,JobPostingDescription>
-                                 = either {
-    let! title, uri =
-        match div.CssSelect "h3>a"
-              |> Seq.tryHead
-              with
-              | Some a -> Right (a.InnerText(), a.AttributeValue "href")
-              | None -> Left "no title found"
-    let! description =
-        match div.CssSelect "[itemscope='description']"
-              |> Seq.tryHead
-              with
-              | Some description -> Right (description.InnerText())
-              | None -> Left (sprintf "no description for %s" title)
-    let url : string = base_url + uri
-    return { title = title; description = description; url = url } }
+let rec parseBasicJobInfoFromDiv (div : HtmlNode)
+                                 : Either<string,BasicJobPostingDescription> =
+    try either {
+        let! title, uri =
+            match div.CssSelect "h3>a"
+                  |> Seq.tryHead
+                  with
+                  | Some a -> Right (a.InnerText(), a.AttributeValue "href")
+                  | None -> "no title found"
+                            |> functionFailWith <@ parseBasicJobInfoFromDiv @>
+        let! description =
+            match div.CssSelect "[itemscope='description']"
+                  |> Seq.tryHead
+                  with
+                  | Some description -> Right (description.InnerText())
+                  | None -> sprintf "no description for %s" title
+                            |> functionFailWith <@ parseBasicJobInfoFromDiv @>
+        let url : string = base_url + uri
+        return { title = title
+                 brief_description = Some description
+                 url = url } }
+    with e ->
+        sprintf "%A" e
+        |> functionFailWith <@ parseBasicJobInfoFromDiv @>
 
 /// collect all brief job descriptions from a job listing page
 /// example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/2/
 let getBriefJobDescriptions (html : JobFinderListing)
-                            : Either<string,JobPostingDescription> seq =
+                            : Either<string,BasicJobPostingDescription> seq =
     html.Lists.Html.CssSelect "[itemtype='https://schema.org/JobPosting']"
-    |> Seq.map parseBriefDescriptionFromDiv
+    |> Seq.map parseBasicJobInfoFromDiv
 
 /// get meta info from a job post
 /// example page: https://www.jobfinder.dk/en-gb/job/329519738/it-chef/
-let getMetaInfo (html: JobFinderPost) : Either<string,MetaInfo> = either {
-    let! div_block =
-        match html.Lists.Html.CssSelect "div"
-              |> Seq.filter
-                  (fun div ->
-                   match div.CssSelect "[itemprop='hiringOrganization']" with
-                   | [] -> false
-                   | _ -> true)
-              |> Seq.tryHead
-              with
-              | Some div -> Right div
-              | None -> Left "no div with [itemprop='hiringOrganization']"
-    let getRow (n : int) f =
-        match div_block.CssSelect "dd"
-              |> Seq.skip n
-              |> Seq.tryHead
-              with
-              | Some row -> f(row.InnerText()) |> Right
-              | None -> sprintf "failed to extract row number %i" n |> Left
-    let! recruiter = getRow 0 id
-    let! location  = getRow 1 id
-    let! posted    = getRow 2 (DateTime.Parse)
-    let! closes    = getRow 3 (DateTime.Parse)
-    return { recruiter = recruiter
-             location = location
-             posted = posted
-             closes = closes } }
+let extractMetaInfo (html: JobFinderPost) : Either<string,ExtractedMetaInfo> =
+    try either {
+        let! div_block =
+            match html.Lists.Html.CssSelect "div"
+                  |> Seq.filter
+                      (fun div ->
+                      match div.CssSelect "[itemprop='hiringOrganization']" with
+                      | [] -> false
+                      | _ -> true)
+                  |> Seq.tryHead
+                  with
+                  | Some div -> Right div
+                  | None -> Left "no div with [itemprop='hiringOrganization']"
+        let getRow (n : int) f =
+            match div_block.CssSelect "dd"
+                  |> Seq.skip n
+                  |> Seq.tryHead
+                  with
+                  | Some row -> f(row.InnerText()) |> Right
+                  | None -> sprintf "failed to extract row number %i" n |> Left
+        let! recruiter = getRow 0 id
+        let! location  = getRow 1 id
+        let! posted    = getRow 2 (DateTime.Parse)
+        let! closes    = getRow 3 (DateTime.Parse)
+        return { recruiter = recruiter
+                 location = Some location
+                 posted = posted
+                 closes = closes
+                 linkedin_views = None
+                 job_function = None
+                 industry = None } }
+    with e ->
+        sprintf "error in function extractMetaInfo\n%A" e
+        |> Left
 
 let getLongDescription (html: JobFinderPost) : Either<string,string> =
     match html.Lists.Html.CssSelect "[itemprop='description']"
@@ -243,69 +138,6 @@ let getLongDescription (html: JobFinderPost) : Either<string,string> =
           | Some result -> Right result
           | None -> Left "getLongDescription failed"
 
-let getDescriptionWords (description : string) : string list =
-    let description_words =
-        description.Split ' '
-        |> Seq.map (fun x -> x.Trim())
-        |> Seq.collect (fun x -> x.Split '/') // .NET/C#
-        |> Seq.choose (fun x ->
-                       let m = Regex("[\w#\+\.\-]+").Match x
-                       if m.Success
-                       then Some m.Value
-                       else None)
-        |> Seq.map (fun x -> x.TrimEnd '.')
-        |> Seq.map (fun x -> x.TrimEnd '-')
-        |> Seq.filter ((<>)"")
-        |> Seq.filter (fun x -> // remove numbers
-            match Int32.TryParse x with
-            | true, _ -> false
-            | _ -> true)
-        |> Seq.map (fun x -> x.ToLower())
-    description_words
-    |> List.ofSeq
-
-let getTags (keywords : KeyWord list) (description_words : string list) : string list =
-    let non_composite_keywords =
-        keywords
-        |> Seq.choose (fun k ->
-                      match k with
-                      | Single k -> Some k
-                      | _ -> None)
-        |> Set.ofSeq
-    let composite_keywords =
-        keywords
-        |> Seq.choose (fun k ->
-                       match k with
-                       | Composite(k1,k2) -> Some (k1,k2)
-                       | _ -> None)
-        |> Set.ofSeq
-    let non_composite_tags =
-        description_words
-        |> Set.ofList
-        |> Seq.filter (fun x -> Set.contains x non_composite_keywords)
-        |> List.ofSeq
-    let composite_tags =
-        description_words
-        |> Seq.windowed 2
-        |> Seq.map (fun [|x;y|] -> x,y)
-        |> Seq.filter (fun x -> Set.contains x composite_keywords)
-        |> Seq.map (fun (x,y) -> sprintf "%s %s" x y)
-        |> List.ofSeq
-    List.concat [non_composite_tags; composite_tags]
-
-let countWords (words : string seq) =
-    words
-    |> Seq.countBy id
-
-let getRareWords (n : int) (word_count : Map<string,int>) (words : string seq) =
-    words
-    |> Seq.sortBy (fun w ->
-                   match Map.tryFind w word_count with
-                   | Some count -> count
-                   | None -> 1)
-    |> Seq.take n
-
-
 // small manual test
 let res =
     either {
@@ -319,7 +151,7 @@ let res =
         let! some_page = List.head urls |> webReader
         let brief_descriptions = JobFinderListing.Parse some_page
                                  |> getBriefJobDescriptions
-                                 |> Seq.take 7
+                                 |> Seq.take 5
         let! some_description = brief_descriptions |> Seq.skip 1 |> Seq.head
         printfn "a description"
         printfn "%A\n" some_description
@@ -327,7 +159,7 @@ let res =
         // get meta info for the job
         let! jobpost_page = some_description.url |> webReader
         let! meta_info = JobFinderPost.Parse jobpost_page
-                         |> getMetaInfo
+                         |> extractMetaInfo
         printfn "some meta info"
         printfn "%A\n" meta_info
 
