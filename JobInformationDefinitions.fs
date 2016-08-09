@@ -2,6 +2,44 @@ module JobInformationDefinitions
 
 open System
 
+(*
+  SQLite tables:
+
+  create table job(
+    title text not null,
+    recruiter text not null,
+    posted text not null,
+    closes text not null,
+    url text not null,
+    brief_description text,
+    scraped_from text not null,
+    location text,
+    industry text,
+    linkedin_views int,
+    job_function text,
+    long_description text not null,
+    unique(title,recruiter,posted,closes, url)
+    );
+
+  create table tag(
+    tag_text text not null,
+    unique(tag_text)
+  );
+
+  create table job_tag(
+    job integer,
+    tag integer,
+    foreign key(job) references job(rowid),
+    foreign key(tag) references tag(rowid)
+  );
+
+  create table rare_words(
+    job integer,
+    rare_words text not null,
+    foreign key(job) references job(rowid)
+    );
+*)
+
 type BasicJobPostingDescription = {
     title : string
     brief_description : string option
@@ -9,9 +47,10 @@ type BasicJobPostingDescription = {
     }
 
 type ExtractedMetaInfo = {
-    recruiter : string
+    recruiter : string // company name
     posted : DateTime
-    closes : DateTime
+    closes : DateTime // deadline for job applications
+    scraped_from : string // site from which the data was extracted
     location : string option
     industry : string option
     linkedin_views : int option
@@ -28,11 +67,11 @@ type JobPosting = {
     basic_description : BasicJobPostingDescription
     long_description : string
     extracted_meta_info : ExtractedMetaInfo
-    derived_meta_info : DerivedMetaInfo
+    derived_meta_info : DerivedMetaInfo option
     }
 
 type KeyWord = Single of string
-             | Composite of string * string
+              | Composite of string * string
 
 // make it possible to let the user specify keywords
 let language_keywords = [
@@ -44,7 +83,7 @@ let language_keywords = [
     Single "csharp"
     Single "fsharp"
     Single "c++"
-    Single "java"
+    Single "tcl"
     Single "java"
     Single "python"
     Single ".net"
@@ -68,8 +107,7 @@ let language_keywords = [
     Single "c"
     Single "vb"
     Single "ruby"
-    Single "sql"
-    ]
+    Single "sql" ]
 
 // make it possible to let the user specify keywords
 let other_keywords = [
@@ -82,5 +120,4 @@ let other_keywords = [
     Single "windows"
     Composite ("machine","learning")
     Composite ("design","patterns")
-    Composite ("unit","test")
-    ]
+    Composite ("unit","test") ]
