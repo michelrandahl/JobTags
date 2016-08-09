@@ -59,15 +59,23 @@ let getTags (keywords : KeyWord list) (description_words : string list) : string
         |> Seq.map (fun (x,y) -> sprintf "%s %s" x y)
         |> List.ofSeq
     List.concat [non_composite_tags; composite_tags]
+    |> Set.ofList
+    |> Set.toList
 
-let countWords (words : string seq) =
+let countWords (words : string seq) : Map<string,int> =
     words
     |> Seq.countBy id
+    |> Map.ofSeq
 
-let getRareWords (n : int) (word_count : Map<string,int>) (words : string seq) =
-    words
-    |> Seq.sortBy (fun w ->
-                   match Map.tryFind w word_count with
-                   | Some count -> count
-                   | None -> 1)
-    |> Seq.take n
+let getRareWords (n : int) (word_count : Map<string,int>) (words : string seq) : string list =
+    let sorted_words =
+        words
+        |> Seq.sortBy (fun w ->
+                      match Map.tryFind w word_count with
+                      | Some count -> count
+                      | None -> 1)
+    let count = Seq.length words
+    if count < n
+    then Seq.take count sorted_words
+    else Seq.take n sorted_words
+    |> List.ofSeq
