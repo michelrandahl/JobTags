@@ -20,6 +20,14 @@ type EitherBuilder() =
         Right x
 let either = new EitherBuilder()
 
+type MaybeBuilder() =
+    member this.Bind(x, f) =
+        match x with
+        | None -> None
+        | Some a -> f a
+    member this.Return x = Some x
+let maybe = new MaybeBuilder()
+
 
 /// experimental reflection to get function name for error logging
 /// use like this getFunctionName <@ someFunction @>
