@@ -1,28 +1,50 @@
+(*
+   scrape JobFinder for jobs and save to a sqlite DB
+*)
 #r "../../packages/FSharp.Data/lib/net40/FSharp.Data.dll"
 #r "System.Xml.Linq.dll"
+#r "../../packages/SQLProvider/lib/FSharp.Data.SqlProvider.dll"
+#r "../../packages/SQLProvider/lib/Mono.Data.Sqlite.dll"
 #load "Utils.fs"
 #load "JobInformationDefinitions.fs"
 #load "JobInformationExtraction.fs"
+#load "DatabaseFunctions.fs"
 
 open FSharp.Data
 open System
 open Utils
 open JobInformationDefinitions
 open JobInformationExtraction
+open DatabaseFunctions
 
 let base_url = "https://www.jobfinder.dk"
-let url = "https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/"
+let categories_url = "https://www.jobfinder.dk/en-gb/moreterms/jobfunction/101/"
 
 // example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/
-type JobFinderListing = HtmlProvider<"jobfinder_listing_sample.html">
+type JobFinderListing = HtmlProvider<"samples/jobfinder_listing_sample.html">
 
 // example page: https://www.jobfinder.dk/en-gb/job/329519738/it-chef/
-type JobFinderPost = HtmlProvider<"jobfinder_post_sample.html">
+type JobFinderPost = HtmlProvider<"samples/jobfinder_post_sample.html">
+
+// example page: https://www.jobfinder.dk/en-gb/moreterms/jobfunction/101/
+type JobFinderCategories = HtmlProvider< "samples/jobfinder_browse_by_jobfunction_sample.html" >
+
+/// collect urls for the various categories
+/// example page: https://www.jobfinder.dk/en-gb/moreterms/jobfunction/101/
+let rec getCategoryUrls (url : string) =
+    try either {
+        let! html = webReader url
+        let parsed = JobFinderCategories.Parse html
+        return parsed.Lists.List6.Html.CssSelect "a"
+               |> Seq.map (fun a -> base_url + a.AttributeValue "href")
+        }
+    with e ->
+        (sprintf "%A" e)
+        |> functionFailWith <@ getCategoryUrls @>
 
 /// fetch link for next job listing url from next button in the bottom of the page
 /// example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/
 let getNextJobListingUrl (html : JobFinderListing) : string option =
-    let content = html.Lists.Html.ToString()
     html.Lists.Html.CssSelect "[rel='next']"
     |> Seq.tryHead
     |> Option.map (fun x -> base_url + x.AttributeValue "href")
@@ -79,7 +101,7 @@ let rec parseBasicJobInfoFromDiv (div : HtmlNode)
 
 /// collect all brief job descriptions from a job listing page
 /// example page: https://www.jobfinder.dk/en-gb/jobs/it-and-software-development/2/
-let getBriefJobDescriptions (html : JobFinderListing)
+let getBasicJobDescriptions (html : JobFinderListing)
                             : Either<string,BasicJobPostingDescription> seq =
     html.Lists.Html.CssSelect "[itemtype='https://schema.org/JobPosting']"
     |> Seq.map parseBasicJobInfoFromDiv
@@ -114,6 +136,7 @@ let extractMetaInfo (html: JobFinderPost) : Either<string,ExtractedMetaInfo> =
                  location = Some location
                  posted = posted
                  closes = closes
+                 scraped_from = "JobFinder"
                  linkedin_views = None
                  job_function = None
                  industry = None } }
@@ -138,80 +161,79 @@ let getLongDescription (html: JobFinderPost) : Either<string,string> =
           | Some result -> Right result
           | None -> Left "getLongDescription failed"
 
-// small manual test
-let res =
-    either {
-        // collect all joblisting urls
-        let! urls = collectJobListingUrls url
-        printfn "job listings urls"
-        List.ofSeq urls
-        |> printfn "%A\n"
+let scrapeJobs (url : string) = either {
+    let! category_links = getCategoryUrls url
+    let! job_listings_cats_and_urls =
+        category_links
+        |> Seq.map (fun url -> either {
+                    let! job_listings_urls = collectJobListingUrls url
+                    return job_listings_urls })
+        |> Seq.fold (fun state x -> either {
+                     let! x = x
+                     let! xs = state
+                     return List.concat [x;  xs] })
+                    (Right [])
+    let! job_listings =
+        job_listings_cats_and_urls
+        |> Seq.fold (fun state url -> either {
+                     let! html = webReader url
+                     let! xs = state
+                     let parsed = JobFinderListing.Parse html
+                     return parsed :: xs })
+                    (Right [])
+    let! basic_job_postings =
+        job_listings
+        |> Seq.map getBasicJobDescriptions
+        |> Seq.concat
+        |> Seq.fold (fun state basic -> either {
+                     let! basic = basic
+                     let! xs = state
+                     return basic :: xs })
+                    (Right [])
+    let! job_postings =
+        basic_job_postings
+        |> Seq.map (fun basic -> either {
+                    let! html = webReader basic.url
+                    let post = JobFinderPost.Parse html
+                    let! long_description = getLongDescription post
+                    let! meta_info = extractMetaInfo post
+                    return { basic_description = basic
+                             long_description = long_description
+                             extracted_meta_info = meta_info
+                             derived_meta_info = None } })
+        |> Seq.fold (fun state job_post -> either {
+                     let! job_post = job_post
+                     let! xs = state
+                     return job_post :: xs } )
+                    (Right [])
+    let total_job_postings =
+        job_postings
+        |> List.length
+    let unique_jobs =
+        job_postings
+        |> Seq.map (fun j ->
+                    (j.basic_description.title,
+                     j.extracted_meta_info.recruiter,
+                     j.extracted_meta_info.posted,
+                     j.extracted_meta_info.closes,
+                     j.basic_description.url), j)
+        |> Map.ofSeq
+        |> Map.toSeq
+        |> Seq.map snd
+    let! saved_jobs =
+        unique_jobs
+        |> Seq.fold (fun state job -> either {
+                     let! saved_job = JobPosting.SaveToDB job
+                     let! xs = state
+                     return saved_job :: xs })
+                    (Right [])
+    let saved_jobs_count = saved_jobs |> List.choose id |> List.length
+    let unique_jobs_count = unique_jobs |> Seq.length
 
-        // get the first brief job description available
-        let! some_page = List.head urls |> webReader
-        let brief_descriptions = JobFinderListing.Parse some_page
-                                 |> getBriefJobDescriptions
-                                 |> Seq.take 5
-        let! some_description = brief_descriptions |> Seq.skip 1 |> Seq.head
-        printfn "a description"
-        printfn "%A\n" some_description
+    (total_job_postings, unique_jobs_count, saved_jobs_count)
+    |||> printfn "total jobs: %i\ntotal unique %i\ntotal saved jobs %i"
 
-        // get meta info for the job
-        let! jobpost_page = some_description.url |> webReader
-        let! meta_info = JobFinderPost.Parse jobpost_page
-                         |> extractMetaInfo
-        printfn "some meta info"
-        printfn "%A\n" meta_info
-
-        // get long description for the job
-        let! long_description =
-            JobFinderPost.Parse jobpost_page
-            |> getLongDescription
-        printfn "long job description"
-        printfn "%s\n" long_description
-
-        // get tags
-        let description_words = getDescriptionWords long_description
-        printfn "description words"
-        printfn "%A\n" description_words
-        let lang_tags = getTags language_keywords description_words
-        printfn "extracted language keywords"
-        printfn "%A" lang_tags
-        let other_tags = getTags other_keywords description_words
-        printfn "extracted other keywords"
-        printfn "%A\n" other_tags
-
-        // get word count to calculate rare words
-        let! all_words =
-            brief_descriptions
-            |> Seq.map (fun d -> either {
-                        let! desc = d
-                        let url = desc.url
-                        let! jobpost = webReader url
-                        let! long_desc =
-                            JobFinderPost.Parse jobpost
-                            |> getLongDescription
-                        let words = getDescriptionWords long_desc
-                        return words })
-            |> Seq.fold (fun xs x -> either {
-                         let! xs' = xs
-                         let! x' = x
-                         return x' :: xs' })
-                        (Right [])
-        let word_count =
-            List.concat all_words
-            |> countWords
-            |> Map.ofSeq
-        // get 5 rare words for the previously extracted description
-        printfn "word count"
-        printfn "%A" word_count
-        let rare_words =
-            getRareWords 5 word_count description_words
-            |> List.ofSeq
-        printfn "rare words"
-        printfn "%A\n" rare_words
-
-        return "it all seems to work!"
-        }
-printfn "%A" res
-
+    return total_job_postings, unique_jobs_count, saved_jobs_count
+    }
+scrapeJobs categories_url
+|> printfn "%A"
